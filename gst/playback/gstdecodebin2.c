@@ -186,6 +186,8 @@ struct _GstDecodeBin
   GList *filtered_errors;       /* filtered error messages */
 
   GList *buffering_status;      /* element currently buffering messages */
+
+  gboolean extra_buffer_required;       /* whether to controll queue size or not */
 };
 
 struct _GstDecodeBinClass
@@ -253,6 +255,7 @@ enum
 #define DEFAULT_POST_STREAM_TOPOLOGY FALSE
 #define DEFAULT_EXPOSE_ALL_STREAMS  TRUE
 #define DEFAULT_CONNECTION_SPEED    0
+#define DEFAULT_EXTRA_SIZE_BUFFERS_BYTES    8 * 1024 * 1024     /* 8 MB */
 
 /* Properties */
 enum
@@ -1097,6 +1100,8 @@ gst_decode_bin_init (GstDecodeBin * decode_bin)
 
   decode_bin->expose_allstreams = DEFAULT_EXPOSE_ALL_STREAMS;
   decode_bin->connection_speed = DEFAULT_CONNECTION_SPEED;
+
+  decode_bin->extra_buffer_required = FALSE;
 }
 
 static void
@@ -2916,6 +2921,7 @@ no_more_pads_cb (GstElement * element, GstDecodeChain * chain)
   GST_DEBUG_OBJECT (element, "Setting group %p to complete", group);
 
   group->no_more_pads = TRUE;
+  group->dbin->extra_buffer_required = FALSE;
   /* this group has prerolled enough to not need more pads,
    * we can probably set its buffering state to playing now */
   GST_DEBUG_OBJECT (group->dbin, "Setting group %p multiqueue to "
@@ -3351,14 +3357,25 @@ multi_queue_overrun_cb (GstElement * queue, GstDecodeGroup * group)
   GST_LOG_OBJECT (dbin, "multiqueue '%s' (%p) is full", GST_OBJECT_NAME (queue),
       queue);
 
-  group->overrun = TRUE;
   /* this group has prerolled enough to not need more pads,
    * we can probably set its buffering state to playing now */
-  GST_DEBUG_OBJECT (group->dbin, "Setting group %p multiqueue to "
-      "'playing' buffering mode", group);
-  decodebin_set_queue_size (group->dbin, group->multiqueue, FALSE,
-      (group->parent ? group->parent->seekable : TRUE));
-
+  if (!group->no_more_pads && group->parent->demuxer
+      && !dbin->extra_buffer_required) {
+    GST_DEBUG_OBJECT (group->dbin,
+        "Setting group %p multiqueue to " "'extra_buffer_required' mode",
+        group);
+    group->overrun = FALSE;
+    dbin->extra_buffer_required = TRUE;
+    decodebin_set_queue_size (group->dbin, group->multiqueue, FALSE,
+        (group->parent ? group->parent->seekable : TRUE));
+  } else {
+    GST_DEBUG_OBJECT (group->dbin, "Setting group %p multiqueue to "
+        "'playing' buffering mode", group);
+    group->overrun = TRUE;
+    dbin->extra_buffer_required = FALSE;
+    decodebin_set_queue_size (group->dbin, group->multiqueue, FALSE,
+        (group->parent ? group->parent->seekable : TRUE));
+  }
   /* FIXME: We should make sure that everything gets exposed now
    * even if child chains are not complete because the will never
    * be complete! Ignore any non-complete chains when exposing
@@ -3534,7 +3551,9 @@ decodebin_set_queue_size_full (GstDecodeBin * dbin, GstElement * multiqueue,
   guint max_bytes, max_buffers;
   guint64 max_time;
 
-  GST_DEBUG_OBJECT (multiqueue, "use buffering %d", use_buffering);
+  GST_DEBUG_OBJECT (multiqueue,
+      "use buffering %d, add extra buffer size mode %d", use_buffering,
+      dbin->extra_buffer_required);
 
   if (preroll || use_buffering) {
     /* takes queue limits, initially we only queue up up to the max bytes limit,
@@ -3550,6 +3569,12 @@ decodebin_set_queue_size_full (GstDecodeBin * dbin, GstElement * multiqueue,
         max_time = seekable ? AUTO_PREROLL_SEEKABLE_SIZE_TIME :
             AUTO_PREROLL_NOT_SEEKABLE_SIZE_TIME;
     }
+  } else if (dbin->extra_buffer_required) {
+    max_bytes = AUTO_PREROLL_SIZE_BYTES + DEFAULT_EXTRA_SIZE_BUFFERS_BYTES;
+    max_buffers = AUTO_PREROLL_SIZE_BUFFERS + DEFAULT_EXTRA_SIZE_BUFFERS_BYTES;
+    if ((max_time = dbin->max_size_time) == 0)
+      max_time = seekable ? AUTO_PREROLL_SEEKABLE_SIZE_TIME :
+          AUTO_PREROLL_NOT_SEEKABLE_SIZE_TIME;
   } else {
     /* update runtime limits. At runtime, we try to keep the amount of buffers
      * in the queues as low as possible (but at least 5 buffers). */
