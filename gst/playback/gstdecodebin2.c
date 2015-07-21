@@ -3387,6 +3387,11 @@ multi_queue_overrun_cb (GstElement * queue, GstDecodeGroup * group)
     if (gst_decode_chain_is_complete (dbin->decode_chain)) {
       if (!gst_decode_bin_expose (dbin))
         GST_WARNING_OBJECT (dbin, "Couldn't expose group");
+    } else {
+      dbin->extra_buffer_required = TRUE;
+      decodebin_set_queue_size (group->dbin, group->multiqueue, FALSE,
+          (group->parent ? group->parent->seekable : TRUE));
+
     }
   }
   EXPOSE_UNLOCK (dbin);
